@@ -46,7 +46,9 @@ if __name__ == '__main__':
         Y_class = explainer.dataset[img_index]['Y_class']
         Y = explainer.dataset[img_index]['Y']
         # print(Y_class, Y)
+        time_stamp = time.time()
         explainer.explain(img_index)
+        print(f"Computation time: \033[92m{(time.time() - time_stamp)}\033[0m s")
         explainer.plot(save_path=f"results/{opt.explanation_name}/{opt.name}/image/P{img_index}_{Y}.png")
         
         # aopc.get_single_aopc_value(explainer.predict, explainer.dataset, img_index, opt.explanation_name, opt.name)
