@@ -3,13 +3,14 @@ import matplotlib.pyplot as plt
 import logging
 import sys
 import os
+import random
 
 from scipy.ndimage import zoom
 
 import torch
 import torch.nn.functional as F
 
-from util.segmentation import basic_segment
+from util.segmentation import basic_segment, hierarchical_segment
 from util.color import red_transparent_blue
 
 from models import create_model
@@ -21,12 +22,22 @@ import tqdm
 
 import math
 
-# RC Viz Code
+def safe_division(numerator, denominator):
+    try:
+        return numerator / denominator
+    except OverflowError:
+        return float('inf')  # or some other appropriate value
 
 def all_subsets(lst):
     for r in range(len(lst) + 1):
         for subset in combinations(lst, r):
             yield list(subset)
+
+def random_of_all_subsets(lst):
+    if len(lst) == 0:
+        return []
+    subset = random.sample(lst, 1)
+    return [subset]
 
 class layer:
     def __init__(self, image, layer_ID):
@@ -37,7 +48,7 @@ class layer:
         self.image = image
         self.layer_ID = layer_ID
 
-        basic_seg = basic_segment(image)
+        basic_seg = hierarchical_segment(image)
         seg_func = lambda img: basic_seg.get_mask(feature_ID=layer_ID)
             
         self.seg_func = seg_func    # Segmentation function
@@ -166,13 +177,15 @@ class BhemExplanation(BaseExplanation):
         self.print_explanation_info()
 
         indexes = [list(self.layers[i].segment_mapping.keys()) for i in range(1, self.layer_num)]
-        scores = np.zeros((1, len(self.dataset.labels), int(input_img.shape[-1]*input_img.shape[-2]/16/16)))
+        # scores = np.zeros((1, len(self.dataset.labels), int(input_img.shape[-1]*input_img.shape[-2]/16/16)))
+        scores = np.zeros((1, len(self.dataset.labels), int(input_img.shape[-2]), input_img.shape[-1]))
 
         # block_num = (2**(len(indexes[0])+len(indexes[1])+len(indexes[2])+len(indexes[3])))
 
         cnt = 0
-        for f1 in indexes[0]:
-            f1s = indexes[0].copy() # copy
+        f1_idx = indexes[0]
+        for f1 in f1_idx:
+            f1s = list(f1_idx.copy()) # copy
             f1s.remove(f1)
             f2_idx = self.mappings['12'][f1]
 
@@ -190,7 +203,7 @@ class BhemExplanation(BaseExplanation):
                     # for f4 in tqdm.tqdm(f4_idx, desc="Layer 4"):
                     for f4 in f4_idx:
 
-                        total_num = len(indexes[0])+len(f2_idx)+len(f3_idx)+len(f4_idx)
+                        # total_num = len(indexes[0])+len(f2_idx)+len(f3_idx)+len(f4_idx)
 
                         f4s = list(f4_idx.copy())
 
@@ -201,11 +214,12 @@ class BhemExplanation(BaseExplanation):
                         #      + self.get_current_masked_image(input_img, [[], [], f3s, []]) * math.factorial(len(f3_idx)) * math.factorial(total_num - len(f3_idx)-1) / math.factorial(total_num) \
                         #      + self.get_current_masked_image(input_img, [[], [], [], f4s]) * math.factorial(len(f4_idx)) * math.factorial(total_num - len(f4_idx)-1) / math.factorial(total_num)
                         
-                        # img1 = self.get_current_masked_image(input_img, [f1s, [], [], []]) / 2**(len(indexes[0])-1) \
-                        #      + self.get_current_masked_image(input_img, [[], f2s, [], []]) / 2**(len(f2_idx)-1) \
-                        #      + self.get_current_masked_image(input_img, [[], [], f3s, []]) / 2**(len(f3_idx)-1) \
-                        #      + self.get_current_masked_image(input_img, [[], [], [], f4s]) / 2**(len(f4_idx)-1)
-                        
+
+                        # img1 = self.get_current_masked_image(input_img, [f1s, [], [], []]) / safe_division(2**(len(indexes[0])-1), 1) \
+                        #      + self.get_current_masked_image(input_img, [[], f2s, [], []]) / safe_division(2**(len(f2_idx)-1), 1) \
+                        #      + self.get_current_masked_image(input_img, [[], [], f3s, []]) / safe_division(2**(len(f3_idx)-1), 1) \
+                        #      + self.get_current_masked_image(input_img, [[], [], [], f4s]) / safe_division(2**(len(f4_idx)-1), 1)
+
                         # img1 = self.get_current_masked_image(input_img, [f1s, [], [], []]) \
                         #      + self.get_current_masked_image(input_img, [[], f2s, [], []]) \
                         #      + self.get_current_masked_image(input_img, [[], [], f3s, []]) \
@@ -213,29 +227,15 @@ class BhemExplanation(BaseExplanation):
 
                         # img = img1 + self.get_current_masked_image(input_img, [[], [], [], [f4]])
 
-                        # plt.figure(figsize=(20, 10))
-                        # plt.subplot(1, 2, 1)
-                        # plt.imshow(self.dataset.inv_transform(img).permute(1,2,0), vmin=0, vmax=255)
-                        # # plt.imshow(img.permute(1,2,0), vmin=0, vmax=255)
-                        # plt.title("Include f4")
-                        # plt.colorbar()
-                        # plt.subplot(1, 2, 2)
-                        # plt.imshow(self.dataset.inv_transform(img1).permute(1,2,0), vmin=0, vmax=255)
-                        # # plt.imshow(img1.permute(1,2,0), vmin=0, vmax=255)
-                        # plt.colorbar()
-                        # plt.title("Exclude f4")
-                        # plt.savefig(f'./img_res/img({f1})({f2})({f3})({f4}).png')
-                        # plt.close()
-                        
                         feature_group_num = (2**(len(f1s)+len(f2s)+len(f3s)+len(f4s)-1))
                         img1 = torch.zeros_like(input_img)
                         img = torch.zeros_like(input_img)
                         s1,s2,s3,s4 = 0,0,0,0
-                        for subset1 in all_subsets(f1s):
-                            for subset2 in all_subsets(f2s):
-                                for subset3 in all_subsets(f3s):
-                                    for subset4 in all_subsets(f4s):
-                                        # print(f"Feature 4: {subset4}")
+                        for subset1 in random_of_all_subsets(f1s):
+                            for subset2 in random_of_all_subsets(f2s):
+                                for subset3 in random_of_all_subsets(f3s):
+                                    for subset4 in random_of_all_subsets(f4s):
+                                        print(f"{f4s}\tFeature 4: {subset4}")
                                         cnt+=1
                                         # print(f"{cnt/total_num}", end='\r')
 
@@ -260,7 +260,12 @@ class BhemExplanation(BaseExplanation):
                                         P2 = self.predict(img1.unsqueeze(0))
                                         # P1.shape, P2.shape: (1,200)
 
-                                        scores[:,:,f4] += np.array((P1-P2).cpu().detach().numpy())/feature_group_num
+                                        mask = self.layers[4].segment_mapping.get(f4)
+                                        if mask is not None:
+                                            for x,y in zip(mask[0], mask[1]):
+                                                scores[:,:,x,y] += np.array((P1-P2).cpu().detach().numpy())/len(mask[0])
+
+                                        # scores[:,:,f4] += np.array((P1-P2).cpu().detach().numpy())/feature_group_num
                                         s4 +=1
                                     s3 +=1
                                 s2 +=1
@@ -271,16 +276,27 @@ class BhemExplanation(BaseExplanation):
                         # np.save('input_img.npy', input_img)
                         # print(cnt)
 
+                        # img /= feature_group_num
+                        # img1 /= feature_group_num
+                        # P1 = self.predict(img.unsqueeze(0))
+                        # P2 = self.predict(img1.unsqueeze(0))
+                        # mask = self.layers[4].segment_mapping.get(f4)
+                        # if mask is not None:
+                        #     for x,y in zip(mask[0], mask[1]):
+                        #         scores[:,:,x,y] += np.array((P1-P2).cpu().detach().numpy())/len(mask[0])
+
+        self.scores = scores.reshape(len(self.dataset.labels), input_img.shape[-2], input_img.shape[-1])
                         # P1 = self.predict(img.unsqueeze(0))
                         # P2 = self.predict(img1.unsqueeze(0))
                         # scores[:,:,f4] += np.array((P1-P2).cpu().detach().numpy())
-        self.scores = scores.reshape(len(self.dataset.labels), int(input_img.shape[-1]/16), int(input_img.shape[-2]/16))
+        # self.scores = scores.reshape(len(self.dataset.labels), int(input_img.shape[-1]/16), int(input_img.shape[-2]/16))
 
         self.scores = np.expand_dims(self.scores[self.class_list], axis=-1) # Add channel dimension
 
-        zoom_factors = (1, 16, 16, 1)  # (N 维度不变，宽高维度放大 16 倍，通道维度不变)
+        # zoom_factors = (1, 16, 16, 1)  # (N 维度不变，宽高维度放大 16 倍，通道维度不变)
 
-        self.scores_to_save = zoom(self.scores, zoom_factors, order=0)/16/16
+        # self.scores_to_save = zoom(self.scores, zoom_factors, order=0)/16/16
+        self.scores_to_save = self.scores
 
         os.makedirs(f'results/{self.opt.explanation_name}/{self.opt.name}/value', exist_ok=True)
         np.save(f'results/{self.opt.explanation_name}/{self.opt.name}/value/P{img_index}_{self.Y}.npy', self.scores_to_save)
@@ -301,7 +317,7 @@ class BhemExplanation(BaseExplanation):
         max_val = np.nanpercentile(np.abs(result_show), 99.9)
         for i in range(result_show.shape[0]):
             axes[0, i+1].set_title(labels_to_display[i])
-            axes[0, i+1].imshow(image_show, cmap=plt.get_cmap('gray'), alpha=0.15)
+            axes[0, i+1].imshow(image_show, cmap=plt.get_cmap('gray'), alpha=0.3)
             axes[0, i+1].imshow(result_show[i], cmap=red_transparent_blue, vmin=-max_val,vmax=max_val)
             axes[0, i+1].axis('off')
             im = axes[0, i+1].imshow(result_show[i], cmap=red_transparent_blue, vmin=-max_val, vmax=max_val)
